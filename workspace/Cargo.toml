@@ -1,0 +1,6 @@
+[workspace]
+members = ["mymacro", "mylib", "app"]
+resolver = "2"
+
+[profile.release]
+strip = false
