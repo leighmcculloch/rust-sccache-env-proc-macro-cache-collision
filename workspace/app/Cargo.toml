@@ -2,10 +2,13 @@
 name = "app"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
+
+[lib]
 
 [[bin]]
 name = "app"
 path = "src/main.rs"
 
 [dependencies]
-mylib = { path = "../mylib" }
+m = { path = "../m" }

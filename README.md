@@ -1,77 +1,44 @@
-# sccache stale-cache reproducer — proc-macro env!() pattern
+# sccache stale-cache reproducer
 
-## TL;DR
+Minimal repro for: a proc macro that evaluates an env var at macro-expansion
+time leaves no `env!()` in post-expansion code, so rustc records no
+`# env-dep:` for that var in dep-info, so sccache's cache key omits the var,
+so two builds with different values map to the same cache entry — and the
+cached `.rlib` is served with the **old** baked-in value.
 
-When a proc macro evaluates `env!("FOO")` **inside the macro itself** (e.g. via
-the [`macro-string`](https://crates.io/crates/macro-string) crate) and emits
-the resolved value as a baked string literal, the post-expansion code that
-rustc compiles contains no `env!()` call. Therefore rustc records no env-dep
-on `FOO` in dep-info. Therefore sccache's cache key for that crate does not
-include `FOO`. Two builds with the same source but different `FOO` values hit
-the same sccache entry, and the second build is served a stale `.rlib`.
+Mirrors what
+[`soroban-sdk-macros::contractmeta`](https://github.com/stellar/rs-soroban-sdk/blob/main/soroban-sdk-macros/src/lib.rs)
+does via the [`macro-string`](https://crates.io/crates/macro-string) crate.
 
-This is exactly the pattern in
-[`soroban-sdk-macros::contractmeta`](https://github.com/stellar/rs-soroban-sdk/blob/main/soroban-sdk-macros/src/lib.rs):
+## Layout
 
-```rust
-let val = args.val.to_token_stream().into();
-let MacroString(val) = parse_macro_input!(val);
+```
+workspace/
+├── m/                    # proc-macro: env_baked!("X") → baked literal of std::env::var("X")
+└── app/                  # rlib (cached) + bin (links the rlib, prints the const)
+    ├── build.rs          # emits cargo:rustc-env=GIT_REVISION=<sha>
+    ├── src/lib.rs        # pub const GIT_REVISION: &str = m::env_baked!("GIT_REVISION");
+    └── src/main.rs       # println!("{}", app::GIT_REVISION);
 ```
 
-It's not a bug in `sccache` or in `crate-git-revision`. It's a consequence of
-how the proc macro consumes `env!()` before rustc ever sees it.
+The const lives in `lib.rs` deliberately. sccache caches rlibs but not
+binaries / proc-macros / cdylibs (they invoke the linker), so putting the
+const in `main.rs` would have hidden the bug — sccache would never have been
+asked to cache or replay it.
 
-## What this repro builds
+## Script
 
-Workspace with three crates:
-
-- `mymacro` — proc-macro crate with `baked!()`, the minimal stand-in for
-  `contractmeta!`. Uses `macro-string` to evaluate `env!()` inside the macro
-  and emit a baked string literal.
-- `mylib` — has a `build.rs` that emits `cargo:rustc-env=GIT_REVISION=<sha>`.
-  Exposes two constants for comparison:
-  - `GIT_REVISION_PLAIN: &str = env!("GIT_REVISION");`           — rustc evaluates
-  - `GIT_REVISION_BAKED: &str = mymacro::baked!(env!("GIT_REVISION"));` — proc macro evaluates
-- `app` — prints both.
-
-## What the script does
-
-1. `git init` + commit → SHA1.
-2. Build with sccache, print both constants.
-3. Make an empty commit → SHA2.
-4. `cargo clean`.
-5. Build with sccache, print both constants.
-6. `cargo clean`, build with sccache disabled, print both (control).
-
-If `PLAIN` updates to SHA2 but `BAKED` stays at SHA1, the bug is reproduced.
-The control build confirms the issue is sccache-specific.
+1. `git init` + commit → `HEAD = SHA1`.
+2. `RUSTC_WRAPPER=sccache cargo build --release`, run, capture embedded value.
+3. Empty commit → `HEAD = SHA2`, then `cargo clean`.
+4. `RUSTC_WRAPPER=sccache cargo build --release`, run, capture embedded value.
+5. If step 4 prints `SHA1` instead of `SHA2`, bug reproduced.
 
 ## Run
 
 ```sh
-cd sccache-repro
 docker build -t sccache-repro .
 docker run --rm sccache-repro
 ```
 
-Exit codes: `0` = no bug, `1` = bug reproduced and isolated, `2` = unexpected.
-
-## What to do about it
-
-Options for soroban-sdk specifically (none affect `crate-git-revision`):
-
-1. **Stop using `MacroString` for the `val` argument.** Emit the `env!()` call
-   into the macro output unchanged and let rustc evaluate it. The macro would
-   need to defer XDR encoding to runtime, or use a const-eval-friendly XDR
-   serializer. Big change.
-2. **Add a "synthetic" env!() reference to the proc macro output**, purely so
-   rustc records the env-dep. e.g. emit
-   `const _: &str = env!("GIT_REVISION");`
-   alongside the baked metadata. Smallest possible change, keeps the existing
-   encoding, ensures sccache (and any other rustc-wrapper) sees the env-dep.
-3. **Document the incompatibility** with rustc-wrapper caches like sccache
-   and recommend users disable the wrapper for builds where the embedded
-   version matters.
-
-Option 2 is the cleanest fix and worth raising upstream in
-[stellar/rs-soroban-sdk](https://github.com/stellar/rs-soroban-sdk).
+Exit 0 = no bug, 1 = stale, 2 = unexpected.
