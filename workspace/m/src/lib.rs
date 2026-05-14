@@ -1,14 +1,16 @@
+use macro_string::MacroString;
 use proc_macro::TokenStream;
 use quote::quote;
+use syn::parse_macro_input;
 
-/// Read the env var at proc-macro expansion time and emit its value as a
-/// baked string literal. After expansion there is no `env!()` for rustc
-/// to record as a dep-info env-dep, so caching layers that key off
-/// dep-info (sccache) won't include this env var in their cache key.
+/// Mirrors `soroban-sdk-macros::contractmeta`: take an expression that may
+/// contain `env!(...)` / `concat!(...)`, evaluate it inside the proc macro
+/// using `macro-string`, and emit the resolved value as a baked string
+/// literal. After expansion there is no `env!()` left in the token stream
+/// rustc compiles, so rustc records no dep-info env-dep.
 #[proc_macro]
-pub fn env_baked(input: TokenStream) -> TokenStream {
-    let name = syn::parse_macro_input!(input as syn::LitStr).value();
-    let value = std::env::var(&name).unwrap_or_default();
-    let lit = proc_macro2::Literal::string(&value);
+pub fn baked(input: TokenStream) -> TokenStream {
+    let MacroString(s) = parse_macro_input!(input);
+    let lit = proc_macro2::Literal::string(&s);
     quote!(#lit).into()
 }

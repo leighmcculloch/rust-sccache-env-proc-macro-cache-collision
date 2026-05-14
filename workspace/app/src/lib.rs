@@ -1,5 +1,6 @@
-// This is the rlib that sccache will cache. The proc macro consumes the
-// env var at expansion time and emits a baked string literal here, so
-// rustc records no env-dep on GIT_REVISION in dep-info, so sccache's
-// cache key for this rlib will not include the value of GIT_REVISION.
-pub const GIT_REVISION: &str = m::env_baked!("GIT_REVISION");
+// The rlib that sccache will cache. The proc macro consumes the env!()
+// invocation at expansion time (via macro-string) and emits a baked
+// literal here, so after expansion there is no `env!()` for rustc to
+// record as a dep-info env-dep on GIT_REVISION — and sccache's cache
+// key for this rlib does not include the value of GIT_REVISION.
+pub const GIT_REVISION: &str = m::baked!(env!("GIT_REVISION"));
